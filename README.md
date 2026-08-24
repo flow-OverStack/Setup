@@ -94,7 +94,7 @@ always safe to run.
 
 ## Known gaps in the upstream services
 
-Two things the setup repo works around that are arguably bugs in the service repos themselves,
+Three things the setup repo works around that are arguably bugs in the service repos themselves,
 documented here so nobody re-discovers them the hard way:
 
 - **No seed data for `Role` or `VoteType`.** `/auth/register` looks up a `Role` row named `"User"`
@@ -104,7 +104,14 @@ documented here so nobody re-discovers them the hard way:
   `VoteType` row named `Upvote`/`Downvote` exists. `lib/bootstrap-data.sh` inserts both directly via
   `psql`, idempotently, right after migrations run. Worth fixing upstream with a proper EF Core seed
   migration in UserService, QuestionService, and AnswerService.
-- **No way to grant the first Admin.** Same circularity as above, one level up: nothing in the public
-  API can ever create the first Admin user. `seed/seed.mjs` works around it by calling the Keycloak
-  Admin API directly (using the same `KC_ADMIN_TOKEN` client secret `setup.sh` already validates) to
-  add `Admin` to one seed user's `roles` attribute, then re-logs them in for a token that carries it.
+- **No seed data for `ReputationRule` either**, so every vote/accept event silently no-ops
+  (`ReputationService.ApplyReputationEventAsync` returns a clean failure the Kafka consumer just logs
+  and drops) and every user's reputation stays 0 forever. Non-fatal, unlike the two above - `psql`
+  seeds five rules covering upvote/downvote/accept for questions and answers so seeded users show
+  real reputation; the point values are illustrative dev defaults, not derived from the codebase, so
+  edit them freely in `lib/bootstrap-data.sh`.
+- **No way to grant the first Admin.** Same circularity as the `Role` gap, one level up: nothing in
+  the public API can ever create the first Admin user. `seed/seed.mjs` works around it by calling the
+  Keycloak Admin API directly (using the same `KC_ADMIN_TOKEN` client secret `setup.sh` already
+  validates) to add `Admin` to one seed user's `roles` attribute, then re-logs them in for a token
+  that carries it.

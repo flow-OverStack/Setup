@@ -29,17 +29,18 @@ SQL
 }
 
 # bootstrap_vote_types <container> <database>
-# MinReputationToVote is left at its schema default (0) so a brand-new user can
-# vote immediately - bootstrap_reputation_rules below seeds the table that lets
-# reputation actually accrue, but nothing should depend on the timing between
-# the two, so voting is never gated on it.
+# Values match VoteTypeMother.cs (QuestionService.Tests / AnswerService.Tests) exactly -
+# the real intended production values, not a guess: 15 rep to upvote, 125 to downvote
+# (mirrors Stack Overflow's actual privilege thresholds), +1/-1 is the per-post score
+# delta (VoteType.ReputationChange - a LOCAL vote tally on the post itself, separate
+# from a user's platform-wide reputation, which is ReputationRule.ReputationChange below).
 bootstrap_vote_types() {
   local container="$1" database="$2"
   log_step "Bootstrapping VoteType table (Upvote/Downvote) in $database"
   docker exec -i "$container" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 -q <<'SQL'
 INSERT INTO "VoteType" ("Name", "MinReputationToVote", "ReputationChange")
-SELECT v.name, 0, v.change
-FROM (VALUES ('Upvote', 10), ('Downvote', -2)) AS v(name, change)
+SELECT v.name, v.min_rep, v.change
+FROM (VALUES ('Upvote', 15, 1), ('Downvote', 125, -1)) AS v(name, min_rep, change)
 WHERE NOT EXISTS (SELECT 1 FROM "VoteType" WHERE "Name" = v.name);
 SQL
   log_ok "VoteType table bootstrapped in $database"
@@ -51,44 +52,46 @@ SQL
 # logs a warning and moves on, per ReputationService.cs/BaseEventConsumer.cs), but
 # it means every seeded user's reputation silently stays 0 forever.
 #
-# Only EventType in {EntityAccepted, EntityUpvoted, EntityDownvoted} ever look up
-# a rule (ApplyReputationEventAsync's default switch branch) - EntityDeleted,
-# EntityVoteRemoved, and EntityAcceptanceRevoked only disable existing
-# ReputationRecord rows and need no rule of their own. EntityAccepted only ever
-# fires with EntityType=Answer (AnswerController exposes /accept; QuestionController
-# does not), so that combination is the only one seeded for EntityAccepted.
+# These 7 rows are copied verbatim from ReputationRuleMother.cs (UserService.Tests) -
+# the real intended rule set, not a guess (its 8th row, "TestSuperEvent", is test-only
+# and skipped here). Only EventType in {EntityAccepted, EntityUpvoted, EntityDownvoted}
+# ever look up a rule (ApplyReputationEventAsync's default switch branch) -
+# EntityDeleted, EntityVoteRemoved, and EntityAcceptanceRevoked only disable existing
+# ReputationRecord rows and need no rule of their own. EntityAccepted only ever fires
+# with EntityType=Answer (AnswerController exposes /accept; QuestionController does
+# not), so EntityType=Question+EntityAccepted is correctly absent.
 #
 # ReputationTarget=0 (Author) is required for a rule to do anything at all - if
-# missing, the whole event is discarded even if an Initiator-target row exists
-# (see the `if (!authorResult.IsSuccess) return authorResult;` short-circuit).
-# ReputationTarget=1 (Initiator) is explicitly optional per a comment in
-# ReputationService.cs ("There can be no rules for initiator") - deliberately not
-# seeded here to avoid inventing reputation semantics beyond what the code confirms.
+# missing, the whole event is discarded even if an Initiator-target row exists (see
+# the `if (!authorResult.IsSuccess) return authorResult;` short-circuit). Note the
+# real rule set has NO Initiator-target rows for Question votes, and no Initiator
+# reward for upvoting an Answer either - only downvoting an Answer costs the
+# initiator rep (-1), and accepting an Answer rewards the initiator (+2, i.e. the
+# asker gains reputation for accepting).
 #
-# Group is null-safe by default (DisableReputationRecordsAsync only acts when
-# Group is non-null and matches), so it only needs a value where the domain
-# behavior it exists for actually applies: auto-disabling a user's prior vote
-# reputation record when they flip their vote on the same entity. Upvote/Downvote
-# on the same EntityType share a Group for that reason; EntityAccepted has none,
-# since acceptance is undone via the separate EntityAcceptanceRevoked event path.
-#
-# ReputationChange point values are illustrative dev-seed defaults (loosely
-# Stack-Overflow-shaped), not derived from anything in the codebase - edit freely.
+# Group="Vote" is what makes DisableReputationRecordsAsync auto-disable a user's
+# prior vote record when they flip their vote on the same entity (it also checks
+# EntityType, so sharing the literal string "Vote" across Question and Answer rows
+# is correct, not a collision). EntityAccepted rows have no Group, since acceptance
+# is undone via the separate EntityAcceptanceRevoked event path instead.
 bootstrap_reputation_rules() {
   log_step "Bootstrapping ReputationRule table in UserService DB"
   docker exec -i postgres-user-db psql -U postgres -d user-service-db -v ON_ERROR_STOP=1 -q <<'SQL'
 INSERT INTO "ReputationRule" ("EventType", "EntityType", "Group", "ReputationChange", "ReputationTarget")
-SELECT v.event_type, v.entity_type, v.grp, v.change, 0
+SELECT v.event_type, v.entity_type, v.grp, v.change, v.target
 FROM (VALUES
-  ('EntityUpvoted',   'Question', 'QuestionVote', 5),
-  ('EntityDownvoted', 'Question', 'QuestionVote', -2),
-  ('EntityUpvoted',   'Answer',   'AnswerVote',   10),
-  ('EntityDownvoted', 'Answer',   'AnswerVote',   -2),
-  ('EntityAccepted',  'Answer',   NULL,           15)
-) AS v(event_type, entity_type, grp, change)
+  ('EntityAccepted',   'Answer',   NULL,   15, 0),
+  ('EntityDownvoted',  'Answer',   NULL,   -1, 1),
+  ('EntityDownvoted',  'Answer',   'Vote', -2, 0),
+  ('EntityUpvoted',    'Answer',   'Vote', 10, 0),
+  ('EntityAccepted',   'Answer',   NULL,    2, 1),
+  ('EntityDownvoted',  'Question', 'Vote', -2, 0),
+  ('EntityUpvoted',    'Question', 'Vote', 10, 0)
+) AS v(event_type, entity_type, grp, change, target)
 WHERE NOT EXISTS (
   SELECT 1 FROM "ReputationRule" r
-  WHERE r."EventType" = v.event_type AND r."EntityType" = v.entity_type AND r."ReputationTarget" = 0
+  WHERE r."EventType" = v.event_type AND r."EntityType" = v.entity_type
+    AND r."ReputationTarget" = v.target AND r."Group" IS NOT DISTINCT FROM v.grp
 );
 SQL
   log_ok "ReputationRule table bootstrapped"

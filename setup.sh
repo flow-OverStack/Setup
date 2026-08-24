@@ -87,11 +87,40 @@ fi
 # shellcheck disable=SC1091
 set -a; source .env; set +a
 
-if [ "$DO_ROTATE_SECRET" = "1" ]; then
-  KC_ADMIN_TOKEN=""
+# Keycloak only imports a realm that doesn't already exist yet - if a Keycloak
+# volume from a previous run is still around, --import-realm is a silent no-op
+# and whatever secret is already baked into that realm stays authoritative.
+# Blindly generating a new KC_ADMIN_TOKEN in that situation writes a value into
+# .env that Keycloak will never recognize, and every later step fails.
+KEYCLOAK_VOLUME_EXISTS=0
+if docker volume ls -q 2>/dev/null | grep -q '^flowoverstack_keycloak_db_data$'; then
+  KEYCLOAK_VOLUME_EXISTS=1
 fi
 
-if [ -z "${KC_ADMIN_TOKEN:-}" ]; then
+OLD_KC_ADMIN_TOKEN="${KC_ADMIN_TOKEN:-}"
+ROTATE_PENDING=0
+
+if [ "$DO_ROTATE_SECRET" = "1" ]; then
+  if [ -z "$OLD_KC_ADMIN_TOKEN" ]; then
+    log_fail "--rotate-secret needs the current KC_ADMIN_TOKEN in .env to authenticate the rotation - none found."
+    exit 1
+  fi
+  if [ "$KEYCLOAK_VOLUME_EXISTS" != "1" ]; then
+    log_fail "--rotate-secret only makes sense against an already-provisioned Keycloak. No Keycloak volume found - just run ./setup.sh."
+    exit 1
+  fi
+  KC_ADMIN_TOKEN=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | cut -c1-32)
+  sed -i "s|^KC_ADMIN_TOKEN=.*|KC_ADMIN_TOKEN=${KC_ADMIN_TOKEN}|" .env
+  ROTATE_PENDING=1
+  log_step "Generated a new KC_ADMIN_TOKEN - will push it to Keycloak once it's reachable"
+elif [ -z "${KC_ADMIN_TOKEN:-}" ]; then
+  if [ "$KEYCLOAK_VOLUME_EXISTS" = "1" ]; then
+    log_fail "KC_ADMIN_TOKEN is missing from .env, but a Keycloak volume from a previous setup already exists."
+    log_fail "Generating a fresh one here would NOT match the secret already stored inside that Keycloak - every later step would fail."
+    log_fail "Fix: either restore the real secret (Keycloak admin console -> Clients -> user-service -> Credentials) into .env,"
+    log_fail "     or start clean:  ./teardown.sh --volumes && ./setup.sh"
+    exit 1
+  fi
   KC_ADMIN_TOKEN=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | cut -c1-32)
   if grep -q '^KC_ADMIN_TOKEN=' .env; then
     sed -i "s|^KC_ADMIN_TOKEN=.*|KC_ADMIN_TOKEN=${KC_ADMIN_TOKEN}|" .env
@@ -99,7 +128,6 @@ if [ -z "${KC_ADMIN_TOKEN:-}" ]; then
     echo "KC_ADMIN_TOKEN=${KC_ADMIN_TOKEN}" >>.env
   fi
   log_step "Generated a new KC_ADMIN_TOKEN"
-  rm -f .setup-complete # the realm import is now stale relative to this secret
 fi
 export KC_ADMIN_TOKEN
 
@@ -146,6 +174,14 @@ log_step "Waiting for Keycloak"
 wait_http "http://localhost:8080/realms/flowOverStack" 120 200 || { on_wait_fail identity-server; exit 1; }
 log_ok "Keycloak realm imported"
 
+if [ "$ROTATE_PENDING" = "1" ]; then
+  log_step "Pushing the new KC_ADMIN_TOKEN into Keycloak (authenticating with the old one)"
+  node lib/rotate-keycloak-secret.mjs "http://localhost:8080" "$OLD_KC_ADMIN_TOKEN" "$KC_ADMIN_TOKEN" \
+    2>&1 | tee -a "$LOG_FILE"
+  [ "${PIPESTATUS[0]}" = "0" ] || exit 1
+  log_ok "Secret rotated"
+fi
+
 log_step "Waiting for Kafka broker, Elasticsearch, Prometheus, Aspire dashboard"
 wait_container_running broker 60 || { on_wait_fail broker; exit 1; }
 wait_http "http://localhost:9200" 90 || { on_wait_fail elasticsearch-elk; exit 1; }
@@ -160,7 +196,10 @@ KC_TOKEN=$(curl -s -X POST "http://localhost:8080/realms/flowOverStack/protocol/
   -d "client_id=user-service&client_secret=${KC_ADMIN_TOKEN}&grant_type=client_credentials" \
   | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).access_token||'')}catch{}})")
 if [ -z "$KC_TOKEN" ]; then
-  log_fail "Could not obtain a client_credentials token for user-service - realm import likely failed"
+  log_fail "Could not obtain a client_credentials token for user-service."
+  log_fail "Either the realm import failed, or KC_ADMIN_TOKEN in .env doesn't match the secret already stored in Keycloak"
+  log_fail "(this happens if .env was lost/regenerated against a Keycloak volume from a previous run)."
+  log_fail "Fix: restore the real secret into .env, or  ./teardown.sh --volumes && ./setup.sh  to start clean."
   exit 1
 fi
 KC_USERS_STATUS=$(curl -s -o /dev/null -w '%{http_code}' \

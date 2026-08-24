@@ -46,9 +46,22 @@ containers here publish HTTP on 8085/8087/8089/8091.
 | `--lite` | Also skip Kibana and Grafana. |
 | `--update` | `git submodule update --remote` - move submodules to their branch tips first. |
 | `--migrate` | Re-apply the migration override after a schema change. |
-| `--rotate-secret` | Regenerate `KC_ADMIN_TOKEN`. Only meaningful right after `teardown.sh --volumes`. |
+| `--rotate-secret` | Change `KC_ADMIN_TOKEN` on a stack that's already running - generates a new one and pushes it into Keycloak via the Admin API (authenticating with the current one). Needs an existing `.env` and Keycloak volume; the opposite of `--volumes`, not a follow-up to it. |
 | `--verbose` | Stream raw `docker compose` output to the console. |
 | `--reset` | `teardown.sh --volumes` then a full setup, from a clean slate. |
+
+## Re-running against existing data
+
+`setup.sh` is safe to run again on a stack that already has volumes from a previous run: Keycloak's
+`--import-realm` no-ops on a realm that already exists, migrations and the reference-data bootstrap
+are idempotent, and seeding is skipped by default once `.setup-complete` is present.
+
+The one thing that must stay in sync with those volumes is `KC_ADMIN_TOKEN` in `.env` - it has to
+match the secret already baked into the existing Keycloak realm, because import won't overwrite it.
+If `.env` is lost (deleted, or a fresh clone pointed at old volumes) while a Keycloak volume still
+exists, `setup.sh` refuses to blindly generate a new token - a mismatched one would fail every
+downstream step - and tells you to either restore the real secret from the Keycloak admin console
+(**Clients → user-service → Credentials**) or run `./teardown.sh --volumes` to start clean.
 
 ## Teardown
 

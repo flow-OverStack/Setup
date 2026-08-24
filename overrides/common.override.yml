@@ -1,0 +1,28 @@
+# Layered onto repos/UserService/docker-compose.common.yml with `-f`.
+# docker compose deep-merges: scalars are replaced, sequences are appended,
+# mappings are merged key-by-key. Services not listed here pass through untouched.
+services:
+  keycloak:
+    command: start --import-realm
+    volumes:
+      - ${SETUP_ROOT}/.keycloak-import:/opt/keycloak/data/import:ro
+
+  # Heavy Kafka-ecosystem services nobody needs for local dev by default.
+  # `profiles: [extras]` means plain `up` skips them; `./extras.sh` starts them on demand.
+  control-center:
+    profiles: [extras]
+  connect:
+    profiles: [extras]
+  rest-proxy:
+    profiles: [extras]
+  schema-registry:
+    profiles: [extras]
+  flink-jobmanager:
+    profiles: [extras]
+  flink-taskmanager:
+    profiles: [extras]
+  flink-sql-client:
+    profiles: [extras]
+  # aspire-dashboard is deliberately NOT deferred: every service's health check
+  # depends on it (AddUrlGroup(AspireDashboardHealthCheckUrl)), so /health can
+  # never report Healthy while it's down.

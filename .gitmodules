@@ -1,0 +1,25 @@
+[submodule "repos/UserService"]
+	path = repos/UserService
+	url = https://github.com/flow-OverStack/UserService.git
+	branch = master
+	shallow = true
+[submodule "repos/QuestionService"]
+	path = repos/QuestionService
+	url = https://github.com/flow-OverStack/QuestionService.git
+	branch = master
+	shallow = true
+[submodule "repos/AnswerService"]
+	path = repos/AnswerService
+	url = https://github.com/flow-OverStack/AnswerService.git
+	branch = master
+	shallow = true
+[submodule "repos/NotificationService"]
+	path = repos/NotificationService
+	url = https://github.com/flow-OverStack/NotificationService.git
+	branch = master
+	shallow = true
+[submodule "repos/ApolloGateway"]
+	path = repos/ApolloGateway
+	url = https://github.com/flow-OverStack/ApolloGateway.git
+	branch = main
+	shallow = true

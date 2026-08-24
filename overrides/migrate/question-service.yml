@@ -1,0 +1,5 @@
+# See overrides/migrate/user-service.yml for why this exists.
+services:
+  question-service:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development

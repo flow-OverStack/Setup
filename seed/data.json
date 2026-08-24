@@ -1,0 +1,97 @@
+{
+  "users": [
+    { "username": "alice", "email": "alice@example.local", "password": "Password123!" },
+    { "username": "bob", "email": "bob@example.local", "password": "Password123!" },
+    { "username": "carol", "email": "carol@example.local", "password": "Password123!" },
+    { "username": "dave", "email": "dave@example.local", "password": "Password123!" },
+    { "username": "erin", "email": "erin@example.local", "password": "Password123!" },
+    { "username": "frank", "email": "frank@example.local", "password": "Password123!" }
+  ],
+  "adminUsername": "alice",
+  "tags": [
+    { "name": "csharp", "description": "Questions about the C# language and .NET." },
+    { "name": "docker", "description": "Containerizing and running applications with Docker." },
+    { "name": "postgresql", "description": "The PostgreSQL relational database." },
+    { "name": "graphql", "description": "Querying APIs with GraphQL." },
+    { "name": "kafka", "description": "Apache Kafka event streaming." },
+    { "name": "keycloak", "description": "Identity and access management with Keycloak." },
+    { "name": "kubernetes", "description": "Container orchestration with Kubernetes." },
+    { "name": "redis", "description": "The Redis in-memory data store." }
+  ],
+  "questions": [
+    {
+      "title": "How do I connect EF Core to PostgreSQL in Docker?",
+      "body": "I have a .NET service running in a container and a Postgres container on the same network. Every connection attempt times out even though both containers are up. What's the correct connection string when both are Dockerized?",
+      "tags": ["docker", "postgresql", "csharp"]
+    },
+    {
+      "title": "GraphQL federation with Apollo Gateway returns null for a subgraph field",
+      "body": "I've set up Apollo Gateway to federate two subgraphs. One subgraph resolves fine, the other always returns null for a field that clearly has data when queried directly. What am I missing in the federation directives?",
+      "tags": ["graphql", "docker"]
+    },
+    {
+      "title": "Kafka consumer group not receiving messages after restart",
+      "body": "After restarting my consumer, it no longer picks up new messages on the topic even though the producer is confirmed publishing. The consumer group shows as active. How do I debug offset commits going wrong here?",
+      "tags": ["kafka"]
+    },
+    {
+      "title": "Keycloak client_credentials grant returns invalid_client",
+      "body": "I configured a confidential client with service accounts enabled, but requesting a token via client_credentials always returns invalid_client. The client ID and secret look correct. What settings am I missing?",
+      "tags": ["keycloak"]
+    },
+    {
+      "title": "Best way to cache with negative caching in Redis using .NET?",
+      "body": "I want to cache both hits and misses (negative caching) for a lookup that's expensive on miss. What's a clean pattern in .NET with StackExchange.Redis for storing a sentinel value for not-found results?",
+      "tags": ["redis", "csharp"]
+    },
+    {
+      "title": "How to expose multiple ports from one Kubernetes service?",
+      "body": "My deployment listens on both a REST port and a gRPC port. I want a single Service object routing to both. Is that possible, or do I need two Service resources?",
+      "tags": ["kubernetes"]
+    },
+    {
+      "title": "PostgreSQL migration script fails with duplicate key on re-run",
+      "body": "Running the same EF Core migration script twice fails on a duplicate primary key. I expected migrations to be idempotent. What's the correct way to make a manual SQL seed idempotent?",
+      "tags": ["postgresql", "csharp"]
+    },
+    {
+      "title": "Difference between routing_url and subgraph_url in Apollo Federation compose config",
+      "body": "In supergraph.yaml I can specify both routing_url and a separate schema.subgraph_url. What's the actual difference, and when would they point to different hosts?",
+      "tags": ["graphql"]
+    },
+    {
+      "title": "docker-compose external network created by another compose file not found",
+      "body": "I have one compose file that creates a network and another that references it as external: true. Running the second file alone fails with 'network not found'. What's the right startup order?",
+      "tags": ["docker"]
+    },
+    {
+      "title": "How does MassTransit retry outbox messages after a Kafka broker restart?",
+      "body": "My outbox pattern publishes via MassTransit to Kafka. When the broker briefly goes down, are in-flight outbox messages retried automatically, or do I need my own retry/backoff policy on top?",
+      "tags": ["kafka", "csharp"]
+    },
+    {
+      "title": "Keycloak realm import via --import-realm silently skips a client",
+      "body": "I'm importing a realm JSON with `kc.sh start --import-realm`. One client from the export never appears in the admin console after import, no error in logs. What would cause a client to be silently dropped?",
+      "tags": ["keycloak", "docker"]
+    },
+    {
+      "title": "Redis requirepass connection string format for StackExchange.Redis",
+      "body": "My Redis container requires a password via --requirepass. What's the correct connection string format to pass host, port, and password together for StackExchange.Redis?",
+      "tags": ["redis"]
+    }
+  ],
+  "answers": [
+    "That timeout is almost always the hostname - inside Docker you must use the service name from docker-compose.yml as the host, never localhost or 127.0.0.1, since each container has its own network namespace. Double check the Server= value in your connection string matches the Postgres service name exactly.",
+    "Check that both subgraphs expose the @key directive on the shared entity type and that the routing_url actually resolves from inside the gateway's network - a subgraph reachable from your host but not from the gateway container will silently return null for federated fields instead of erroring.",
+    "This is usually a stale consumer offset combined with auto.offset.reset=latest - if the consumer group was inactive past the topic's retention window its offsets get cleaned up, and on restart it seeks to the tail instead of the last committed offset. Try auto.offset.reset=earliest for local dev.",
+    "invalid_client on a confidential client almost always means serviceAccountsEnabled is off, or the client secret sent doesn't match what's stored. Re-check Keycloak Admin Console under the client's Credentials tab, and make sure you're not accidentally sending the client_id twice.",
+    "A common pattern is wrapping the cache value in a small envelope like CacheEntry<T> with a Found bool, and storing that envelope (even for misses) with a short TTL. On read, deserialize and check Found before treating it as a real miss - that's the actual negative-caching part.",
+    "A single Kubernetes Service can expose multiple ports - just list them all under spec.ports with distinct name and port/targetPort pairs. Clients then address the same Service DNS name on whichever port they need; you don't need separate Service objects unless you need different selectors.",
+    "Manual SQL seeds need an explicit idempotency guard since plain INSERT has none by default - either add a unique constraint and use ON CONFLICT DO NOTHING, or wrap the insert in a WHERE NOT EXISTS subquery if there's no natural unique column to conflict on.",
+    "routing_url is where the gateway sends runtime queries at request time; subgraph_url is only used by `rover supergraph compose` to introspect the schema when building the supergraph. They're often the same address, but need to differ whenever the composer runs somewhere that can't reach the same hostname the gateway uses at runtime - e.g. composing on your host against a service that only container DNS can resolve.",
+    "Compose files with `external: true` never create the network themselves - whichever file is supposed to create it must be brought up first with a plain (non-external) network definition. Order your startup scripts so the network-owning compose file runs before anything that references it externally.",
+    "MassTransit's retry policies apply to consumer-side failures, not outbox publishing - the outbox pattern here writes to Postgres in the same transaction as the business change, and a separate background job publishes from that table with its own configurable backoff schedule, independent of MassTransit's transport retries.",
+    "A client failing to import silently is almost always a duplicate clientId conflicting with a built-in client, or a validation failure on one of its protocol mappers that Keycloak logs at DEBUG level rather than WARN - re-run with `--verbose` and grep the log for the client's ID specifically.",
+    "The standard format is `host:port,password=yourpassword`, e.g. `localhost:6379,password=redis_password`. You can also add `,abortConnect=false` for local dev so the app doesn't crash if Redis isn't up yet when your process starts."
+  ]
+}

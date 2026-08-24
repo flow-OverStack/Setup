@@ -1,0 +1,8 @@
+# Layered on top of repos/UserService/docker-compose.yml on the first run only.
+# ASPNETCORE_ENVIRONMENT=Development makes the service apply EF Core migrations
+# on startup. Kept out of the base compose file (a submodule) so nothing there
+# is ever edited in place.
+services:
+  user-service:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development

@@ -189,9 +189,12 @@ if [ "$ROTATE_PENDING" = "1" ]; then
 fi
 
 log_step "Waiting for Kafka broker, Elasticsearch, Prometheus"
-wait_container_running broker 60 || { on_wait_fail broker; exit 1; }
-wait_http "http://localhost:9200" 90 || { on_wait_fail elasticsearch-elk; exit 1; }
-wait_http "http://localhost:9090/-/ready" 60 200 || { on_wait_fail prometheus; exit 1; }
+# Kafka can take up to ~5 minutes cold (KRaft storage format + log recovery);
+# Elasticsearch/Prometheus are usually well under 2 minutes. Timeouts below
+# carry margin over both rather than matching them exactly.
+wait_kafka_broker broker 360 || { on_wait_fail broker; exit 1; }
+wait_http "http://localhost:9200" 150 || { on_wait_fail elasticsearch-elk; exit 1; }
+wait_http "http://localhost:9090/-/ready" 150 200 || { on_wait_fail prometheus; exit 1; }
 log_ok "Common infrastructure is up"
 
 # --- 5. assert Keycloak client works ----------------------------------------

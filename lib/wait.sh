@@ -51,6 +51,11 @@ wait_health() {
 }
 
 # wait_container_running <container_name> <timeout_seconds>
+# NOTE: this only proves the container's process has started - for cp-server's
+# Kafka broker specifically, that happens within seconds, long before the broker
+# has finished KRaft storage formatting and log recovery and can actually serve
+# requests. Use wait_kafka_broker for the broker; this is for containers where
+# "process is running" is an adequate proxy for "ready".
 wait_container_running() {
   local name="$1" timeout="${2:-60}"
   local start
@@ -64,6 +69,30 @@ wait_container_running() {
       return 1
     fi
     sleep 2
+  done
+}
+
+# wait_kafka_broker <container_name> <timeout_seconds>
+# Kafka cold starts can genuinely take up to ~5 minutes (KRaft storage format,
+# log recovery) even though the container process itself is "Running" within
+# seconds - wait_container_running would pass almost immediately and let
+# setup.sh race ahead to start the four app services against a broker that
+# isn't actually serving yet. kafka-broker-api-versions (ships in the
+# confluentinc/cp-server image) only succeeds once the broker genuinely answers
+# requests, so it's the real readiness probe, not a process-alive proxy.
+wait_kafka_broker() {
+  local name="$1" timeout="${2:-360}"
+  local start
+  start=$(date +%s)
+  while true; do
+    if docker exec "$name" kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
+      log_fail "Timed out after ${timeout}s waiting for the Kafka broker ($name) to answer kafka-broker-api-versions"
+      return 1
+    fi
+    sleep 5
   done
 }
 

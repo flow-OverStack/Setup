@@ -69,12 +69,18 @@ fi
 
 if [ "$SEED_ONLY" = "1" ]; then
   log_step "Seed-only run"
-  if [ "$RESEED" = "1" ]; then
-    node seed/seed.mjs --reseed 2>&1 | tee -a "$LOG_FILE"
-  else
-    node seed/seed.mjs 2>&1 | tee -a "$LOG_FILE"
+  if [ ! -f .env ]; then
+    log_fail "No .env found - the stack has never been set up here. Run ./setup.sh first."
+    exit 1
   fi
-  exit $?
+  # The seeder needs KC_ADMIN_TOKEN (to grant the first Admin) and REDIS_PASSWORD
+  # (to drop stale reputation cache keys between phases).
+  # shellcheck disable=SC1091
+  set -a; source .env; set +a
+  SEED_ARGS=()
+  [ "$RESEED" = "1" ] && SEED_ARGS+=(--reseed)
+  KC_HOST=http://localhost:8080 node seed/seed.mjs "${SEED_ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+  exit "${PIPESTATUS[0]}"
 fi
 
 preflight
@@ -271,7 +277,8 @@ if [ "$SEED_MODE" = "auto" ] && [ "$FIRST_RUN" = "1" ]; then DO_SEED=1; fi
 
 if [ "$DO_SEED" = "1" ]; then
   log_step "Seeding mock data"
-  KC_HOST=http://localhost:8080 KC_ADMIN_TOKEN="$KC_ADMIN_TOKEN" node seed/seed.mjs 2>&1 | tee -a "$LOG_FILE"
+  KC_HOST=http://localhost:8080 KC_ADMIN_TOKEN="$KC_ADMIN_TOKEN" REDIS_PASSWORD="$REDIS_PASSWORD" \
+    node seed/seed.mjs 2>&1 | tee -a "$LOG_FILE"
 else
   log_step "Skipping seed (use --seed or --seed-only to run it)"
 fi

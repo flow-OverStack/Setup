@@ -74,6 +74,17 @@ SQL
 # EntityType, so sharing the literal string "Vote" across Question and Answer rows
 # is correct, not a collision). EntityAccepted rows have no Group, since acceptance
 # is undone via the separate EntityAcceptanceRevoked event path instead.
+#
+# ONE DELIBERATE DEVIATION from ReputationRuleMother.cs: it gives the
+# EntityDownvoted/Answer/Initiator rule Group=NULL while its Author counterpart has
+# Group='Vote'. ReputationService then runs
+#     rules.Select(x => x.Group).Distinct().Single()
+# over every rule matching (EventType, EntityType) - two distinct Groups make
+# .Single() throw, so downvoting an answer would blow up in BaseEventConsumer and
+# dead-letter the event. The service's own comment states the invariant ("Group is
+# either NULL or identical across all ReputationRule records" for a given
+# EventType+EntityType), so the mother data violates it; we set Group='Vote' on
+# both to satisfy it. Worth fixing upstream in ReputationRuleMother.cs too.
 bootstrap_reputation_rules() {
   log_step "Bootstrapping ReputationRule table in UserService DB"
   docker exec -i postgres-user-db psql -U postgres -d user-service-db -v ON_ERROR_STOP=1 -q <<'SQL'
@@ -81,7 +92,7 @@ INSERT INTO "ReputationRule" ("EventType", "EntityType", "Group", "ReputationCha
 SELECT v.event_type, v.entity_type, v.grp, v.change, v.target
 FROM (VALUES
   ('EntityAccepted',   'Answer',   NULL,   15, 0),
-  ('EntityDownvoted',  'Answer',   NULL,   -1, 1),
+  ('EntityDownvoted',  'Answer',   'Vote', -1, 1),
   ('EntityDownvoted',  'Answer',   'Vote', -2, 0),
   ('EntityUpvoted',    'Answer',   'Vote', 10, 0),
   ('EntityAccepted',   'Answer',   NULL,    2, 1),

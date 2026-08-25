@@ -1,20 +1,24 @@
 #!/usr/bin/env node
-// Seeds flow OverStack with mock data through the public REST APIs (not SQL),
-// because QuestionService/AnswerService/NotificationService only know users by
-// the id UserService assigns them - only the real registration path keeps ids
-// consistent across services and fires the Kafka/outbox events NotificationService
-// depends on. Bootstrap reference data (roles, vote types, reputation rules) is a
-// separate, earlier step in setup.sh via lib/bootstrap-data.sh - this script
-// assumes it already ran.
+// Seeds flow OverStack with mock data through the public REST APIs. Nothing here
+// fabricates domain state: users register, ask, answer, accept and vote exactly as
+// a real client would, and reputation is *earned* from those actions via the
+// outbox -> Kafka -> UserService path rather than being written into the DB.
 //
-// The one exception is reputation: there is no public API that can create a
-// ReputationRecord (it's purely an internal side effect of vote/accept events),
-// and it needs real User.Id values that don't exist until after registration -
-// so it can't live in the early bootstrap phase either. This script inserts it
-// directly via psql, once per user, right after registration.
+// That earning is why this runs in phases. Each action has an entry requirement:
+//   accept   - none beyond owning the question   (AcceptAnswerHandler)
+//   upvote   - 15 reputation                     (VoteType.MinReputationToVote)
+//   downvote - 125 reputation
+// so the only way to bootstrap from a cold database is accept -> upvote -> downvote,
+// waiting between phases for the reputation from the previous one to land.
+// seed/verify-data.mjs replays that math over data.json without a running stack.
 //
-// Idempotent: registration 409s ("user already exists") on a second run and that
-// is treated as "already seeded", so the whole run short-circuits.
+// Two infrastructure pokes are unavoidable between phases, neither of which invents
+// data: polling Postgres to see whether the Kafka consumer has written the
+// ReputationRecord rows yet, and dropping the Redis reputation keys so the services
+// re-read them instead of serving a 300s-stale value.
+//
+// Idempotent: registration 409s on a second run and that is treated as
+// "already seeded", so the whole run short-circuits.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -29,15 +33,17 @@ const QUESTION_BASE = process.env.QUESTION_SERVICE_URL ?? 'http://localhost:8087
 const ANSWER_BASE = process.env.ANSWER_SERVICE_URL ?? 'http://localhost:8089';
 const NOTIFICATION_BASE = process.env.NOTIFICATION_SERVICE_URL ?? 'http://localhost:8091';
 const KC_HOST = process.env.KC_HOST ?? 'http://localhost:8080';
+const REDIS_PASSWORD = process.env.REDIS_PASSWORD ?? '';
+
+const MIN_REP_UPVOTE = 15; // VoteType.MinReputationToVote, see lib/bootstrap-data.sh
+const MIN_REP_DOWNVOTE = 125;
+const REPUTATION_TIMEOUT_MS = 120_000; // outbox polls every 15s (OutboxBackgroundService)
 
 const RESEED = process.argv.includes('--reseed');
 
-function log(msg) {
-  console.log(`[seed] ${msg}`);
-}
-function warn(msg) {
-  console.warn(`[seed] WARN: ${msg}`);
-}
+const log = (m) => console.log(`[seed] ${m}`);
+const warn = (m) => console.warn(`[seed] WARN: ${m}`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function api(method, url, { token, body, headers: extraHeaders } = {}) {
   const headers = { 'content-type': 'application/json', ...extraHeaders };
@@ -51,10 +57,14 @@ async function api(method, url, { token, body, headers: extraHeaders } = {}) {
   try {
     json = await res.json();
   } catch {
-    // empty body is fine
+    // empty body (e.g. 204) is fine
   }
   return { status: res.status, ok: res.ok, body: json };
 }
+
+const unwrap = (res) => res.body?.data ?? res.body; // BaseResult<T> wraps payloads in .data
+
+// ---------------------------------------------------------------- users
 
 async function registerUser(u) {
   const res = await api('POST', `${USER_BASE}/api/v1/auth/register`, {
@@ -70,25 +80,22 @@ async function loginUser(u) {
     body: { identifier: u.username, password: u.password },
   });
   if (!res.ok) throw new Error(`login ${u.username} failed: ${res.status} ${JSON.stringify(res.body)}`);
-  return res.body.data ?? res.body; // BaseResult<TokenDto> wraps in .data
+  return unwrap(res).accessToken;
 }
 
 async function initUser(token) {
-  // Must be called once after registration - the frontend's job normally, the
-  // seeder plays that role here. Idempotent: UserProvisioningService.InitAsync
-  // returns the existing UserDto (with its real numeric Id) on every call once
-  // the local row exists, so this also doubles as "how do I get this user's id".
+  // Normally the frontend's job after registration. Idempotent - returns the
+  // existing UserDto once the local row exists, so it doubles as "what is this
+  // user's numeric id", which every later phase needs.
   const res = await api('POST', `${USER_BASE}/api/v1/auth/init`, { token });
   if (!res.ok) throw new Error(`init failed: ${res.status} ${JSON.stringify(res.body)}`);
-  return (res.body.data ?? res.body).id;
+  return unwrap(res).id;
 }
 
 async function promoteToAdmin(username) {
-  // No API path can grant Admin on a fresh install (RoleController itself
-  // requires Admin - see lib/bootstrap-data.sh for the full explanation), so
-  // this reaches into Keycloak directly via the same admin token setup.sh
-  // already validated.
-  const adminToken = process.env.KC_ADMIN_TOKEN;
+  // Nothing in the public API can grant the first Admin - RoleController itself
+  // requires Admin. See lib/bootstrap-data.sh for the full circularity writeup.
+  const adminSecret = process.env.KC_ADMIN_TOKEN;
   const realm = 'flowOverStack';
 
   const tokenRes = await fetch(`${KC_HOST}/realms/${realm}/protocol/openid-connect/token`, {
@@ -96,7 +103,7 @@ async function promoteToAdmin(username) {
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       client_id: 'user-service',
-      client_secret: adminToken,
+      client_secret: adminSecret,
       grant_type: 'client_credentials',
     }),
   });
@@ -106,8 +113,7 @@ async function promoteToAdmin(username) {
   const findRes = await fetch(`${KC_HOST}/admin/realms/${realm}/users?username=${username}&exact=true`, {
     headers: { authorization: `Bearer ${kcToken}` },
   });
-  const users = await findRes.json();
-  const kcUser = users[0];
+  const kcUser = (await findRes.json())[0];
   if (!kcUser) throw new Error(`Keycloak user ${username} not found - register/login must run first`);
 
   const roles = new Set(kcUser.attributes?.roles ?? []);
@@ -121,45 +127,81 @@ async function promoteToAdmin(username) {
   if (!updateRes.ok) throw new Error(`Failed to grant Admin to ${username}: ${updateRes.status}`);
 }
 
-// Seeds reputation the same way the app itself would arrive at it - by creating
-// ReputationRecord rows against the real EntityUpvoted/Question/Author rule
-// (+10 each, see lib/bootstrap-data.sh) - just directly via SQL, since no public
-// API can create one. All rows share a single CreatedAt (`now()`, one value per
-// SQL statement) on purpose: GetUserService.GetCurrentReputationsAsync groups
-// ReputationRecords by (UserId, Date) and the gRPC layer calls .Single() on a
-// single-user lookup - records spread across more than one calendar date would
-// throw. Skips a user entirely if they already have any records, so `--reseed`
-// doesn't stack multiples on top of what a prior run created.
-function seedReputation(userId, upvoteCount) {
-  if (upvoteCount <= 0) return; // no records -> falls back to the app's own MinReputation default
-  if (!Number.isInteger(userId) || !Number.isInteger(upvoteCount)) {
-    throw new Error(`seedReputation: expected integers, got userId=${userId} upvoteCount=${upvoteCount}`);
-  }
+// ------------------------------------------------- reputation propagation
+
+// Reads reputation straight from Postgres using the same expression
+// GetUserService.GetCurrentReputationsAsync computes in LINQ: per (user, day),
+// clamp the summed rule deltas of enabled records into [MinReputation, MaxDailyReputation].
+// Reading the source of truth (rather than an API) tells us specifically whether
+// the Kafka consumer has landed the rows yet, with no cache in the way.
+function readReputations() {
   const sql = `
-DO $$
-DECLARE
-  rule_id bigint;
-  existing_count int;
-BEGIN
-  SELECT COUNT(*) INTO existing_count FROM "ReputationRecord" WHERE "ReputationTargetId" = ${userId};
-  IF existing_count > 0 THEN
-    RETURN;
-  END IF;
-
-  SELECT "Id" INTO rule_id FROM "ReputationRule"
-    WHERE "EventType" = 'EntityUpvoted' AND "EntityType" = 'Question'
-      AND "ReputationTarget" = 0 AND "Group" = 'Vote';
-
-  INSERT INTO "ReputationRecord" ("ReputationTargetId", "InitiatorId", "ReputationRuleId", "EntityId", "Enabled", "CreatedAt")
-  SELECT ${userId}, ${userId}, rule_id, 900000 + n, true, now()
-  FROM generate_series(1, ${upvoteCount}) AS n;
-END $$;
-`;
-  execFileSync('docker', ['exec', '-i', 'postgres-user-db', 'psql', '-U', 'postgres', '-d', 'user-service-db', '-v', 'ON_ERROR_STOP=1', '-q'], {
-    input: sql,
-    stdio: ['pipe', 'inherit', 'inherit'],
-  });
+SELECT rr."ReputationTargetId",
+       GREATEST(1, LEAST(SUM(ru."ReputationChange"), 200))
+FROM "ReputationRecord" rr
+JOIN "ReputationRule" ru ON ru."Id" = rr."ReputationRuleId"
+WHERE rr."Enabled"
+GROUP BY rr."ReputationTargetId", rr."CreatedAt"::date;`;
+  const out = execFileSync(
+    'docker',
+    ['exec', '-i', 'postgres-user-db', 'psql', '-U', 'postgres', '-d', 'user-service-db', '-t', '-A', '-F', '|', '-c', sql],
+    { encoding: 'utf-8' },
+  );
+  const byId = {};
+  for (const line of out.split('\n')) {
+    const [id, value] = line.trim().split('|');
+    if (id && value) byId[Number(id)] = Number(value);
+  }
+  return byId;
 }
+
+// GetCurrentReputationsAsync is cached in Redis for RedisSettings TimeToLiveInSeconds
+// (300s in docker-compose). Without dropping the keys, a service that read a user's
+// reputation before it changed keeps serving the old number for five minutes, and
+// every vote gated on it would 403. Deleting a cache entry invents nothing.
+function flushReputationCache() {
+  const lua = "local n=0 for _,k in ipairs(redis.call('keys','user:*reputation')) do redis.call('del',k) n=n+1 end return n";
+  try {
+    execFileSync(
+      'docker',
+      ['exec', 'redis-user-service', 'redis-cli', '--no-auth-warning', '-a', REDIS_PASSWORD, 'EVAL', lua, '0'],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+  } catch (e) {
+    warn(`could not flush the Redis reputation cache: ${e.message}`);
+  }
+}
+
+// Waits for earned reputation to travel outbox -> Kafka -> UserService, then drops
+// the cache so the next phase's gate checks see the new values.
+async function waitForReputation(requirements, userIds, label) {
+  const names = Object.keys(requirements);
+  if (names.length === 0) return;
+  const need = names.map((n) => `${n}>=${requirements[n]}`).join(' ');
+  log(`waiting for reputation to propagate (${label}: ${need})`);
+
+  const started = Date.now();
+  let last = {};
+  while (Date.now() - started < REPUTATION_TIMEOUT_MS) {
+    const byId = readReputations();
+    last = Object.fromEntries(names.map((n) => [n, byId[userIds[n]] ?? 1]));
+    if (names.every((n) => last[n] >= requirements[n])) {
+      flushReputationCache();
+      const secs = ((Date.now() - started) / 1000).toFixed(0);
+      log(`reputation ready after ${secs}s (${names.map((n) => `${n}=${last[n]}`).join(' ')})`);
+      return;
+    }
+    await sleep(3000);
+  }
+  warn(
+    `timed out after ${REPUTATION_TIMEOUT_MS / 1000}s waiting for ${label}. ` +
+      `Current: ${names.map((n) => `${n}=${last[n] ?? '?'}`).join(' ')}. ` +
+      `The outbox -> Kafka -> UserService path may be stalled; votes needing reputation will be rejected below.`,
+  );
+  flushReputationCache();
+}
+
+// ---------------------------------------------------------------- content
 
 async function ensureTag(token, tag) {
   const res = await api('POST', `${QUESTION_BASE}/api/v1/tag`, {
@@ -179,33 +221,16 @@ async function askQuestion(token, q) {
     warn(`question "${q.title}" failed: ${res.status} ${JSON.stringify(res.body)}`);
     return null;
   }
-  return (res.body.data ?? res.body).id;
+  return unwrap(res).id;
 }
 
 async function postAnswer(token, questionId, body) {
-  const res = await api('POST', `${ANSWER_BASE}/api/v1/answer`, {
-    token,
-    body: { questionId, body },
-  });
+  const res = await api('POST', `${ANSWER_BASE}/api/v1/answer`, { token, body: { questionId, body } });
   if (!res.ok) {
     warn(`answer on question ${questionId} failed: ${res.status} ${JSON.stringify(res.body)}`);
     return null;
   }
-  return (res.body.data ?? res.body).id;
-}
-
-async function voteQuestion(token, questionId, direction) {
-  const res = await api('PATCH', `${QUESTION_BASE}/api/v1/question/${questionId}/${direction}`, { token });
-  if (!res.ok && res.status !== 409) {
-    warn(`${direction} question ${questionId} failed: ${res.status} ${JSON.stringify(res.body)}`);
-  }
-}
-
-async function voteAnswer(token, answerId, direction) {
-  const res = await api('PATCH', `${ANSWER_BASE}/api/v1/answer/${answerId}/${direction}`, { token });
-  if (!res.ok && res.status !== 409) {
-    warn(`${direction} answer ${answerId} failed: ${res.status} ${JSON.stringify(res.body)}`);
-  }
+  return unwrap(res).id;
 }
 
 async function acceptAnswer(token, answerId) {
@@ -215,72 +240,111 @@ async function acceptAnswer(token, answerId) {
   }
 }
 
-async function recordView(questionId, view) {
-  // Fire-and-forget by design: IncrementViewsAsync only queues into Redis - the
-  // actual View rows land later via a background sync job, not synchronously.
-  const headers = { 'X-Fingerprint': view.fingerprint };
-  const token = view.by ? sessions[view.by] : undefined;
-  const res = await api('POST', `${QUESTION_BASE}/api/v1/view/${questionId}`, { token, headers });
+async function castVote(kind, token, id, direction) {
+  const base = kind === 'question' ? QUESTION_BASE : ANSWER_BASE;
+  const res = await api('PATCH', `${base}/api/v1/${kind}/${id}/${direction}`, { token });
+  if (!res.ok && res.status !== 409) {
+    warn(`${direction} on ${kind} ${id} failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+}
+
+async function recordView(sessions, questionId, view) {
+  // IncrementViewsAsync only queues into Redis - real View rows are written later
+  // by the background sync job, so there is nothing to wait for here.
+  const res = await api('POST', `${QUESTION_BASE}/api/v1/view/${questionId}`, {
+    token: view.by ? sessions[view.by] : undefined,
+    headers: { 'X-Fingerprint': view.fingerprint },
+  });
   if (!res.ok && res.status !== 204) {
     warn(`view on question ${questionId} failed: ${res.status} ${JSON.stringify(res.body)}`);
   }
 }
 
-const sessions = {};
+// ---------------------------------------------------------------- main
 
 async function main() {
   log(`registering ${data.users.length} users`);
   const results = await Promise.all(data.users.map(registerUser));
-
   if (!RESEED && results.every((r) => r === 'exists')) {
     log('all seed users already exist - stack already seeded, nothing to do');
     return;
   }
 
+  const sessions = {};
   const userIds = {};
   for (const u of data.users) {
-    const token = (await loginUser(u)).accessToken;
-    const id = await initUser(token);
+    const token = await loginUser(u);
+    userIds[u.username] = await initUser(token);
     sessions[u.username] = token;
-    userIds[u.username] = id;
-    log(`logged in ${u.username} (id ${id})`);
   }
+  log(`logged in ${data.users.length} users`);
 
-  log('seeding reputation records');
-  for (const u of data.users) {
-    seedReputation(userIds[u.username], u.reputationUpvotes);
+  for (const username of data.adminUsernames) {
+    await promoteToAdmin(username);
+    // Re-login: the previous token was issued before the roles attribute changed.
+    sessions[username] = await loginUser(data.users.find((u) => u.username === username));
   }
-
-  for (const adminUsername of data.adminUsernames) {
-    log(`promoting ${adminUsername} to Admin via Keycloak`);
-    await promoteToAdmin(adminUsername);
-    // Fresh token needed - the old one was issued before the roles attribute changed.
-    const adminUser = data.users.find((u) => u.username === adminUsername);
-    sessions[adminUsername] = (await loginUser(adminUser)).accessToken;
-  }
-  const primaryAdminToken = sessions[data.adminUsernames[0]];
+  log(`granted Admin to ${data.adminUsernames.join(', ')}`);
 
   log(`creating ${data.tags.length} tags`);
-  for (const tag of data.tags) await ensureTag(primaryAdminToken, tag);
+  for (const tag of data.tags) await ensureTag(sessions[data.adminUsernames[0]], tag);
 
-  log(`asking ${data.questions.length} questions and their answers`);
+  // Phase 1 - questions and answers. No reputation required for either.
+  const posted = []; // { q, questionId, answers: [{ a, answerId }] }
   for (const q of data.questions) {
     const questionId = await askQuestion(sessions[q.askedBy], q);
     if (questionId == null) continue;
-
-    for (const v of q.votes) await voteQuestion(sessions[v.by], questionId, v.direction);
-    for (const v of q.views) await recordView(questionId, v);
-
+    const answers = [];
     for (const a of q.answers) {
       const answerId = await postAnswer(sessions[a.answeredBy], questionId, a.body);
-      if (answerId == null) continue;
+      if (answerId != null) answers.push({ a, answerId });
+    }
+    posted.push({ q, questionId, answers });
+  }
+  const answerCount = posted.reduce((n, p) => n + p.answers.length, 0);
+  log(`posted ${posted.length} questions and ${answerCount} answers`);
 
-      for (const v of a.votes) await voteAnswer(sessions[v.by], answerId, v.direction);
-      if (a.accepted) await acceptAnswer(sessions[q.askedBy], answerId);
+  // Phase 2 - accepts. The only reputation source available from a cold start.
+  let accepted = 0;
+  for (const { q, answers } of posted) {
+    for (const { a, answerId } of answers) {
+      if (!a.accepted) continue;
+      await acceptAnswer(sessions[q.askedBy], answerId);
+      accepted++;
     }
   }
+  log(`accepted ${accepted} answers`);
 
-  log('verifying the Kafka -> notification path');
+  // Flatten the declared votes; who needs what reputation falls out of the data.
+  const votes = [];
+  for (const { q, questionId, answers } of posted) {
+    for (const v of q.votes) votes.push({ kind: 'question', id: questionId, ...v });
+    for (const { a, answerId } of answers) {
+      for (const v of a.votes) votes.push({ kind: 'answer', id: answerId, ...v });
+    }
+  }
+  const upvotes = votes.filter((v) => v.direction === 'upvote');
+  const downvotes = votes.filter((v) => v.direction === 'downvote');
+
+  const requirementsFor = (list, minimum) =>
+    Object.fromEntries([...new Set(list.map((v) => v.by))].map((n) => [n, minimum]));
+
+  // Phase 3 - upvotes, once the accept reputation has landed.
+  await waitForReputation(requirementsFor(upvotes, MIN_REP_UPVOTE), userIds, 'upvoters');
+  for (const v of upvotes) await castVote(v.kind, sessions[v.by], v.id, 'upvote');
+  log(`cast ${upvotes.length} upvotes`);
+
+  // Phase 4 - downvotes, once the upvote reputation has landed.
+  await waitForReputation(requirementsFor(downvotes, MIN_REP_DOWNVOTE), userIds, 'downvoters');
+  for (const v of downvotes) await castVote(v.kind, sessions[v.by], v.id, 'downvote');
+  log(`cast ${downvotes.length} downvotes`);
+
+  const viewCount = posted.reduce((n, p) => n + p.q.views.length, 0);
+  for (const { q, questionId } of posted) {
+    for (const view of q.views) await recordView(sessions, questionId, view);
+  }
+  log(`recorded ${viewCount} views`);
+
   const notifRes = await api('GET', `${NOTIFICATION_BASE}/api/v1/notification`, {
     token: sessions[data.users[0].username],
   });
@@ -291,8 +355,14 @@ async function main() {
     warn(`could not verify notifications: ${notifRes.status}`);
   }
 
-  const answerCount = data.questions.reduce((n, q) => n + q.answers.length, 0);
-  log(`done: ${data.users.length} users, ${data.tags.length} tags, ${data.questions.length} questions, ${answerCount} answers`);
+  const finalRep = readReputations();
+  log('final reputation (earned entirely through the API):');
+  for (const u of data.users) {
+    const r = finalRep[userIds[u.username]] ?? 1;
+    const tier = r >= MIN_REP_DOWNVOTE ? 'can upvote + downvote' : r >= MIN_REP_UPVOTE ? 'can upvote' : 'cannot vote';
+    console.log(`         ${u.username.padEnd(8)} ${String(r).padStart(4)}   ${tier}`);
+  }
+  log(`done: ${data.users.length} users, ${data.tags.length} tags, ${posted.length} questions, ${answerCount} answers`);
 }
 
 main().catch((err) => {

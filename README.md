@@ -82,13 +82,11 @@ tooling you may never open.
 ```bash
 ./extras.sh create              # create them, don't start
 ./extras.sh up                  # start all of them
-./extras.sh up control-center   # start just one
+./extras.sh up aspire-dashboard # start just one
 ./extras.sh down                # stop them
 ```
 
-`aspire-dashboard` gets special treatment: `setup.sh` creates (but doesn't start) it automatically on
-every run, since it's cheap and commonly wanted - `docker start aspire-dashboard` brings it up in
-seconds. The other seven are neither created nor started unless you ask via `extras.sh`.
+None of the eight are created or started unless you ask via `extras.sh` - `setup.sh` never touches them.
 
 ## Repo layout
 

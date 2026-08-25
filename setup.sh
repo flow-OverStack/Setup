@@ -176,12 +176,6 @@ else
   log_run $USER_COMPOSE up -d
 fi
 
-# aspire-dashboard is in the `extras` profile like the Kafka-ecosystem services
-# (nothing depends on it any more - it's a telemetry sink, not a runtime dependency),
-# but unlike those it's cheap and commonly wanted, so it's created - not started -
-# by default. `docker start aspire-dashboard` brings it up in seconds when needed.
-log_run $USER_COMPOSE --profile extras create aspire-dashboard
-
 log_step "Waiting for Keycloak"
 wait_http "http://localhost:8080/realms/flowOverStack" 120 200 || { on_wait_fail identity-server; exit 1; }
 log_ok "Keycloak realm imported"
@@ -304,11 +298,9 @@ flow OverStack is up.
   pgAdmin               http://localhost:8888  (${PGADMIN_EMAIL})
   Jaeger                http://localhost:16686
 
-Created but not started (nothing needs it running): docker start aspire-dashboard
-  -> http://localhost:18888
-
 Deferred (run './extras.sh up <name>' to start): control-center, connect,
-rest-proxy, schema-registry, flink-jobmanager, flink-taskmanager, flink-sql-client.
+rest-proxy, schema-registry, flink-jobmanager, flink-taskmanager, flink-sql-client,
+aspire-dashboard.
 
 Full log: $LOG_FILE
 EOF

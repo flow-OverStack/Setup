@@ -29,7 +29,7 @@ That's it. On first run this:
 4. Applies EF Core migrations on all four services
 5. Bootstraps reference data the services need to function (see [Known gaps](#known-gaps-in-the-upstream-services))
 6. Composes and starts the Apollo Gateway
-7. Seeds ~6 users, ~15 questions, answers, and votes through the real APIs
+7. Seeds 6 users, 8 tags, 12 questions, 17 answers, and votes through the real APIs
 
 Takes roughly 3-6 minutes cold. Endpoints are printed at the end - also see the table in the
 [profile README](https://github.com/flow-OverStack/.github/blob/main/profile/README.md), noting that
@@ -121,7 +121,7 @@ documented here so nobody re-discovers them the hard way:
 - **No seed data for `ReputationRule` either**, so every vote/accept event silently no-ops
   (`ReputationService.ApplyReputationEventAsync` returns a clean failure the Kafka consumer just logs
   and drops) and every user's reputation stays 0 forever. Non-fatal, unlike the two above - `psql`
-  seeds five rules covering upvote/downvote/accept for questions and answers so seeded users show
+  seeds seven rules covering upvote/downvote/accept for questions and answers so seeded users show
   real reputation; the point values are illustrative dev defaults, not derived from the codebase, so
   edit them freely in `lib/bootstrap-data.sh`.
 - **No way to grant the first Admin.** Same circularity as the `Role` gap, one level up: nothing in

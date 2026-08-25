@@ -130,18 +130,35 @@ async function promoteToAdmin(username) {
 // ------------------------------------------------- reputation propagation
 
 // Reads reputation straight from Postgres using the same expression
-// GetUserService.GetCurrentReputationsAsync computes in LINQ: per (user, day),
-// clamp the summed rule deltas of enabled records into [MinReputation, MaxDailyReputation].
+// GetUserService.GetCurrentReputationsAsync computes in LINQ: group by (user, day),
+// clamp each day's summed rule deltas into [MinReputation, MaxDailyReputation].
+// The per-day grouping is there to apply the *daily* cap, so a user's total is the
+// sum of their clamped per-day values - hence the nested aggregate below. Grouping
+// per day and stopping there would return one row per (user, day), and the loop
+// underneath would silently keep only the last one: fine within a single seeding
+// session, wrong for any run that crosses UTC midnight, where the vote gates in
+// phases 3 and 4 would then wait out their full timeout for a threshold already met.
+//
+// Two knowing deviations from the LINQ, both conservative:
+//   - `WHERE rr."Enabled"` has no counterpart in the method; GetAll() may apply it
+//     as a global query filter. Seeded data never disables records either way.
+//   - 1 and 200 hardcode BusinessRules.MinReputation / MaxDailyReputation, which
+//     aren't visible under the sparse checkout.
+//
 // Reading the source of truth (rather than an API) tells us specifically whether
 // the Kafka consumer has landed the rows yet, with no cache in the way.
 function readReputations() {
   const sql = `
-SELECT rr."ReputationTargetId",
-       GREATEST(1, LEAST(SUM(ru."ReputationChange"), 200))
-FROM "ReputationRecord" rr
-JOIN "ReputationRule" ru ON ru."Id" = rr."ReputationRuleId"
-WHERE rr."Enabled"
-GROUP BY rr."ReputationTargetId", rr."CreatedAt"::date;`;
+SELECT d."ReputationTargetId", SUM(d.daily)
+FROM (
+  SELECT rr."ReputationTargetId",
+         GREATEST(1, LEAST(SUM(ru."ReputationChange"), 200)) AS daily
+  FROM "ReputationRecord" rr
+  JOIN "ReputationRule" ru ON ru."Id" = rr."ReputationRuleId"
+  WHERE rr."Enabled"
+  GROUP BY rr."ReputationTargetId", rr."CreatedAt"::date
+) d
+GROUP BY d."ReputationTargetId";`;
   const out = execFileSync(
     'docker',
     ['exec', '-i', 'postgres-user-db', 'psql', '-U', 'postgres', '-d', 'user-service-db', '-t', '-A', '-F', '|', '-c', sql],

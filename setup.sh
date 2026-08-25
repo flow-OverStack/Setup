@@ -49,7 +49,26 @@ for arg in "$@"; do
     --reseed) SEED_ONLY=1; RESEED=1 ;;
     --verbose) VERBOSE=1 ;;
     -h|--help)
-      grep '^#' "$0" | sed 's/^# \?//'
+      cat <<'EOF'
+Usage: ./setup.sh [flags]
+
+One-command bring-up for flow OverStack. With no flags: syncs submodules, starts
+the stack, applies migrations on a first run, and seeds mock data on a first run.
+
+  --seed            Force seeding on (default: only on a first run).
+  --no-seed         Force seeding off.
+  --seed-only       Skip the bring-up; just seed an already-running stack.
+  --reseed          --seed-only, ignoring the "already seeded" check.
+  --lite            Also skip Kibana and Grafana.
+  --update          git submodule update --remote - move submodules to branch tips.
+  --migrate         Re-apply the migration override after a schema change.
+  --rotate-secret   Generate a new KC_ADMIN_TOKEN and push it into a running Keycloak.
+  --reset           teardown.sh --volumes, then a full setup from a clean slate.
+  --verbose         Stream raw docker compose output to the console.
+  -h, --help        Show this help.
+
+See README.md for the details behind each flag.
+EOF
       exit 0
       ;;
     *)
@@ -174,7 +193,10 @@ if [ "$DO_LITE" = "1" ]; then
   log_run $USER_COMPOSE up -d --scale kibana=0 --scale grafana=0
 else
   log_run $USER_COMPOSE up -d
-fi
+fi || {
+  log_fail "docker compose failed to bring up the common infrastructure - see $LOG_FILE"
+  exit 1
+}
 
 log_step "Waiting for Keycloak"
 wait_http "http://localhost:8080/realms/flowOverStack" 120 200 || { on_wait_fail identity-server; exit 1; }
@@ -230,7 +252,10 @@ up_service() {
     cmd="$cmd -f overrides/migrate/$(echo "$name" | sed -E 's/([a-z])([A-Z])/\1-\2/g' | tr '[:upper:]' '[:lower:]').yml"
   fi
   log_step "Starting $name"
-  log_run $cmd up -d
+  log_run $cmd up -d || {
+    log_fail "docker compose failed to start $name - see $LOG_FILE"
+    exit 1
+  }
 }
 
 up_service UserService docker-compose.yml userservice
@@ -266,9 +291,14 @@ log_step "Composing and starting the Apollo Gateway"
   cd repos/ApolloGateway
   export APOLLO_ELV2_LICENSE=accept
   npx -y @apollo/rover@latest supergraph compose --config supergraph.docker.yaml \
-    >supergraph.graphql 2>>"$SETUP_ROOT/$LOG_FILE"
-  docker compose up -d --build >>"$SETUP_ROOT/$LOG_FILE" 2>&1
-)
+    >supergraph.graphql.tmp 2>>"$SETUP_ROOT/$LOG_FILE" \
+    || { rm -f supergraph.graphql.tmp; exit 1; }
+  mv supergraph.graphql.tmp supergraph.graphql
+  docker compose up -d --build >>"$SETUP_ROOT/$LOG_FILE" 2>&1 || exit 1
+) || {
+  log_fail "Apollo Gateway build failed (rover supergraph compose, or the image build) - see $LOG_FILE"
+  exit 1
+}
 wait_http "http://localhost:5000/graphql" 60 400 || { on_wait_fail apollo-gateway; exit 1; }
 log_ok "Gateway is up"
 

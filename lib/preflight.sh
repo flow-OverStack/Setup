@@ -32,12 +32,22 @@ preflight() {
   local ports=(8080 8081 8888 9092 9101 16686 4317 4318 9090 3000 9200 5601 18888 18889
                8085 8086 5433 5046 8000 6379 8087 8088 5435 5047 8001 6380
                8089 8090 5436 5048 8002 6381 8091 5437 5049 8003 6382 5000)
+  # Snapshot the listening sockets once, then grep it per port. `ss` is absent on
+  # Git Bash - the primary Windows path - so fall back to Windows netstat, whose
+  # rows look like "  TCP    0.0.0.0:8080    0.0.0.0:0    LISTENING    1704".
+  local listening=""
+  if command -v ss >/dev/null 2>&1; then
+    listening=$(ss -ltn 2>/dev/null)
+  elif command -v netstat >/dev/null 2>&1; then
+    listening=$(netstat -ano 2>/dev/null | grep -i 'LISTEN')
+  fi
+
   local busy=()
-  for p in "${ports[@]}"; do
-    if command -v ss >/dev/null 2>&1; then
-      ss -ltn "( sport = :$p )" 2>/dev/null | grep -q ":$p" && busy+=("$p")
-    fi
-  done
+  if [ -n "$listening" ]; then
+    for p in "${ports[@]}"; do
+      grep -qE "[:.]$p[[:space:]]" <<<"$listening" && busy+=("$p")
+    done
+  fi
   if [ "${#busy[@]}" -gt 0 ]; then
     log_warn "Ports already in use on the host: ${busy[*]}"
     log_warn "flow OverStack will fail to bind these unless whatever's using them is stopped."

@@ -176,6 +176,12 @@ else
   log_run $USER_COMPOSE up -d
 fi
 
+# aspire-dashboard is in the `extras` profile like the Kafka-ecosystem services
+# (nothing depends on it any more - it's a telemetry sink, not a runtime dependency),
+# but unlike those it's cheap and commonly wanted, so it's created - not started -
+# by default. `docker start aspire-dashboard` brings it up in seconds when needed.
+log_run $USER_COMPOSE --profile extras create aspire-dashboard
+
 log_step "Waiting for Keycloak"
 wait_http "http://localhost:8080/realms/flowOverStack" 120 200 || { on_wait_fail identity-server; exit 1; }
 log_ok "Keycloak realm imported"
@@ -188,11 +194,10 @@ if [ "$ROTATE_PENDING" = "1" ]; then
   log_ok "Secret rotated"
 fi
 
-log_step "Waiting for Kafka broker, Elasticsearch, Prometheus, Aspire dashboard"
+log_step "Waiting for Kafka broker, Elasticsearch, Prometheus"
 wait_container_running broker 60 || { on_wait_fail broker; exit 1; }
 wait_http "http://localhost:9200" 90 || { on_wait_fail elasticsearch-elk; exit 1; }
 wait_http "http://localhost:9090/-/ready" 60 200 || { on_wait_fail prometheus; exit 1; }
-wait_http "http://localhost:18888" 60 || { on_wait_fail aspire-dashboard; exit 1; }
 log_ok "Common infrastructure is up"
 
 # --- 5. assert Keycloak client works ----------------------------------------
@@ -297,8 +302,10 @@ flow OverStack is up.
   Grafana               http://localhost:3000  (${GF_SECURITY_ADMIN_USER})
   Kibana                http://localhost:5601
   pgAdmin               http://localhost:8888  (${PGADMIN_EMAIL})
-  Aspire dashboard      http://localhost:18888
   Jaeger                http://localhost:16686
+
+Created but not started (nothing needs it running): docker start aspire-dashboard
+  -> http://localhost:18888
 
 Deferred (run './extras.sh up <name>' to start): control-center, connect,
 rest-proxy, schema-registry, flink-jobmanager, flink-taskmanager, flink-sql-client.

@@ -23,6 +23,5 @@ services:
     profiles: [extras]
   flink-sql-client:
     profiles: [extras]
-  # aspire-dashboard is deliberately NOT deferred: every service's health check
-  # depends on it (AddUrlGroup(AspireDashboardHealthCheckUrl)), so /health can
-  # never report Healthy while it's down.
+  aspire-dashboard:
+    profiles: [extras]

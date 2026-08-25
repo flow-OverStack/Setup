@@ -74,19 +74,19 @@ downstream step - and tells you to either restore the real secret from the Keycl
 
 ## Extras
 
-Eight services from the shared Kafka/observability stack aren't started by default because nothing in
-the app needs them at runtime (control-center, connect, rest-proxy, schema-registry, the three Flink
-services, and aspire-dashboard) - they add several GB of RAM and a good chunk of cold-start time for
-tooling you may never open.
+Nine services from the shared Kafka/observability/admin stack aren't started by default because
+nothing in the app needs them at runtime (control-center, connect, rest-proxy, schema-registry, the
+three Flink services, aspire-dashboard, and pgadmin) - they add several GB of RAM and a good chunk of
+cold-start time for tooling you may never open.
 
 ```bash
 ./extras.sh create              # create them, don't start
 ./extras.sh up                  # start all of them
-./extras.sh up aspire-dashboard # start just one
+./extras.sh up pgadmin          # start just one
 ./extras.sh down                # stop them
 ```
 
-None of the eight are created or started unless you ask via `extras.sh` - `setup.sh` never touches them.
+None of the nine are created or started unless you ask via `extras.sh` - `setup.sh` never touches them.
 
 ## Repo layout
 

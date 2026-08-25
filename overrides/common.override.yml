@@ -7,10 +7,11 @@ services:
     volumes:
       - ${SETUP_ROOT}/.keycloak-import:/opt/keycloak/data/import:ro
 
-  # Heavy Kafka-ecosystem services, plus aspire-dashboard (a telemetry sink no
-  # service's health check depends on any more) - nobody needs these for local
-  # dev by default. `profiles: [extras]` means plain `up` skips them entirely
-  # (not created, not started); `./extras.sh` creates/starts them on demand.
+  # Heavy Kafka-ecosystem services, aspire-dashboard (a telemetry sink no
+  # service's health check depends on any more), and pgAdmin (a DB admin UI -
+  # nothing depends on it, either) - nobody needs these for local dev by
+  # default. `profiles: [extras]` means plain `up` skips them entirely (not
+  # created, not started); `./extras.sh` creates/starts them on demand.
   control-center:
     profiles: [extras]
   connect:
@@ -26,4 +27,6 @@ services:
   flink-sql-client:
     profiles: [extras]
   aspire-dashboard:
+    profiles: [extras]
+  pgadmin:
     profiles: [extras]

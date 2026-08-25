@@ -298,12 +298,11 @@ flow OverStack is up.
   Keycloak              http://localhost:8080  (admin: ${KC_BOOTSTRAP_ADMIN_USERNAME})
   Grafana               http://localhost:3000  (${GF_SECURITY_ADMIN_USER})
   Kibana                http://localhost:5601
-  pgAdmin               http://localhost:8888  (${PGADMIN_EMAIL})
   Jaeger                http://localhost:16686
 
 Deferred (run './extras.sh up <name>' to start): control-center, connect,
 rest-proxy, schema-registry, flink-jobmanager, flink-taskmanager, flink-sql-client,
-aspire-dashboard.
+aspire-dashboard, pgadmin.
 
 Full log: $LOG_FILE
 EOF

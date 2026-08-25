@@ -28,17 +28,22 @@ wait_http() {
 }
 
 # wait_health <url> <timeout_seconds>
-# Polls a .NET /health endpoint until the body is exactly "Healthy".
+# Polls a .NET /health endpoint until its top-level status is "Healthy". The
+# four services all map /health with HealthCheckOptions { ResponseWriter =
+# UIResponseWriter.WriteHealthCheckUIResponse } (see Program.cs), which returns
+# a JSON body like {"status":"Healthy","entries":{...}} - NOT a bare "Healthy"
+# string - so this has to parse it, not string-compare the raw body.
 wait_health() {
   local url="$1" timeout="${2:-180}"
   local start
   start=$(date +%s)
   while true; do
-    local body
+    local body status
     body=$(curl -s --max-time 5 "$url" 2>/dev/null || true)
-    [ "$body" = "Healthy" ] && return 0
+    status=$(printf '%s' "$body" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).status||'')}catch{}})" 2>/dev/null)
+    [ "$status" = "Healthy" ] && return 0
     if [ $(( $(date +%s) - start )) -ge "$timeout" ]; then
-      log_fail "Timed out after ${timeout}s waiting for $url to report Healthy (last: ${body:0:200})"
+      log_fail "Timed out after ${timeout}s waiting for $url to report Healthy (last status: ${status:-<unparseable>}, body: ${body:0:200})"
       return 1
     fi
     sleep 3

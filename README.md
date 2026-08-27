@@ -16,8 +16,8 @@ pulled in as git submodules, brought up with Docker Compose, and seeded with moc
 ## Quick start
 
 ```bash
-git clone --recurse-submodules --shallow-submodules https://github.com/flow-OverStack/Setup
-cd setup
+git clone --recurse-submodules --shallow-submodules https://github.com/flow-OverStack/Setup.git
+cd Setup
 ./setup.sh
 ```
 

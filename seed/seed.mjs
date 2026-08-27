@@ -122,7 +122,9 @@ async function promoteToAdmin(username) {
   const updateRes = await fetch(`${KC_HOST}/admin/realms/${realm}/users/${kcUser.id}`, {
     method: 'PUT',
     headers: { authorization: `Bearer ${kcToken}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ attributes: { ...kcUser.attributes, roles: [...roles] } }),
+    // Keycloak's user PUT replaces the whole representation, not just the given
+    // fields - omitting username makes it reject with 400 "User name is missing".
+    body: JSON.stringify({ ...kcUser, attributes: { ...kcUser.attributes, roles: [...roles] } }),
   });
   if (!updateRes.ok) throw new Error(`Failed to grant Admin to ${username}: ${updateRes.status}`);
 }

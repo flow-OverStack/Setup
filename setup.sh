@@ -31,6 +31,7 @@ DO_MIGRATE=0
 DO_LITE=0
 DO_RESET=0
 DO_ROTATE_SECRET=0
+SKIP_HEALTH_CHECKS=0
 SEED_MODE=auto        # auto | on | off
 SEED_ONLY=0
 RESEED=0
@@ -43,6 +44,7 @@ for arg in "$@"; do
     --lite) DO_LITE=1 ;;
     --reset) DO_RESET=1 ;;
     --rotate-secret) DO_ROTATE_SECRET=1 ;;
+    --skip-health-checks) SKIP_HEALTH_CHECKS=1 ;;
     --seed) SEED_MODE=on ;;
     --no-seed) SEED_MODE=off ;;
     --seed-only) SEED_ONLY=1 ;;
@@ -63,6 +65,9 @@ the stack, applies migrations on a first run, and seeds mock data on a first run
   --update          git submodule update --remote - move submodules to branch tips.
   --migrate         Re-apply the migration override after a schema change.
   --rotate-secret   Generate a new KC_ADMIN_TOKEN and push it into a running Keycloak.
+  --skip-health-checks  Don't fail the run if a service's container/health checks
+                        don't pass - log and move on instead. For debugging a
+                        service in isolation, not for a normal run.
   --reset           teardown.sh --volumes, then a full setup from a clean slate.
   --verbose         Stream raw docker compose output to the console.
   -h, --help        Show this help.
@@ -199,7 +204,7 @@ fi || {
 }
 
 log_step "Waiting for Keycloak"
-wait_http "http://localhost:8080/realms/flowOverStack" 120 200 || { on_wait_fail identity-server; exit 1; }
+wait_http "http://localhost:8080/realms/flowOverStack" 300 200 || { on_wait_fail identity-server; exit 1; }
 log_ok "Keycloak realm imported"
 
 if [ "$ROTATE_PENDING" = "1" ]; then
@@ -263,23 +268,41 @@ up_service QuestionService docker-compose.yml questionservice
 up_service AnswerService docker-compose.yaml answerservice
 up_service NotificationService docker-compose.yaml notificationservice
 
+check_service() {
+  local kind="$1" name="$2" target="$3" timeout="$4"
+  if [ "$SKIP_HEALTH_CHECKS" = "1" ]; then
+    log_warn "Skipping $kind check for $name (--skip-health-checks)"
+    return 0
+  fi
+  case "$kind" in
+    container) wait_container_running "$target" "$timeout" ;;
+    http) wait_health "$target" "$timeout" ;;
+  esac || { on_wait_fail "$name"; exit 1; }
+}
+
 log_step "Waiting for services to apply migrations and boot"
 sleep 5 # migrations run before Kestrel starts listening; avoid a tight 000 loop
-wait_container_running user-service 90 || { on_wait_fail user-service; exit 1; }
-wait_container_running question-service 90 || { on_wait_fail question-service; exit 1; }
-wait_container_running answer-service 90 || { on_wait_fail answer-service; exit 1; }
-wait_container_running notification-service 90 || { on_wait_fail notification-service; exit 1; }
-
-# --- 7. bootstrap reference data (roles, vote types) ------------------------
-# Must run after migrations create the tables, before anything calls /auth/register.
-bootstrap_reference_data
+check_service container user-service user-service 90
+check_service container question-service question-service 90
+check_service container answer-service answer-service 90
+check_service container notification-service notification-service 90
 
 log_step "Waiting for /health on all four services"
-wait_health "http://localhost:8085/health" 180 || { on_wait_fail user-service; exit 1; }
-wait_health "http://localhost:8087/health" 180 || { on_wait_fail question-service; exit 1; }
-wait_health "http://localhost:8089/health" 180 || { on_wait_fail answer-service; exit 1; }
-wait_health "http://localhost:8091/health" 180 || { on_wait_fail notification-service; exit 1; }
-log_ok "All services are healthy"
+check_service http user-service "http://localhost:8085/health" 180
+check_service http question-service "http://localhost:8087/health" 180
+check_service http answer-service "http://localhost:8089/health" 180
+check_service http notification-service "http://localhost:8091/health" 180
+log_ok "All services are healthy (or skipped per --skip-health-checks)"
+
+# --- 7. bootstrap reference data (roles, vote types) ------------------------
+# Runs after the /health wait so migrations are guaranteed to have completed -
+# a fresh --reset run races the app's own migration step otherwise, and this
+# INSERTs into tables the migration creates.
+if [ "$SKIP_HEALTH_CHECKS" = "1" ]; then
+  log_warn "Skipping reference-data bootstrap (--skip-health-checks means migrations aren't confirmed done)"
+else
+  bootstrap_reference_data
+fi
 
 if [ "$FIRST_RUN" = "1" ] || [ "$DO_MIGRATE" = "1" ]; then
   touch .setup-complete
@@ -290,11 +313,22 @@ log_step "Composing and starting the Apollo Gateway"
 (
   cd repos/ApolloGateway
   export APOLLO_ELV2_LICENSE=accept
-  npx -y @apollo/rover@latest supergraph compose --config supergraph.docker.yaml \
-    >supergraph.graphql.tmp 2>>"$SETUP_ROOT/$LOG_FILE" \
-    || { rm -f supergraph.graphql.tmp; exit 1; }
+  # The subgraphs just cleared their /health gate, but their /graphql endpoint
+  # (a bigger first request) isn't always warmed up yet - retry a couple times
+  # before giving up on what's usually just a few more seconds of JIT warmup.
+  ok=0
+  for attempt in 1 2 3; do
+    if npx -y @apollo/rover@latest supergraph compose --config supergraph.docker.yaml \
+      >supergraph.graphql.tmp 2>>"$SETUP_ROOT/$LOG_FILE"; then
+      ok=1
+      break
+    fi
+    rm -f supergraph.graphql.tmp
+    [ "$attempt" -lt 3 ] && sleep 10
+  done
+  [ "$ok" = "1" ] || exit 1
   mv supergraph.graphql.tmp supergraph.graphql
-  docker compose up -d --build >>"$SETUP_ROOT/$LOG_FILE" 2>&1 || exit 1
+  docker compose up -d >>"$SETUP_ROOT/$LOG_FILE" 2>&1 || exit 1
 ) || {
   log_fail "Apollo Gateway build failed (rover supergraph compose, or the image build) - see $LOG_FILE"
   exit 1

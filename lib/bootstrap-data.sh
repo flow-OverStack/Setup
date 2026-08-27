@@ -20,7 +20,7 @@
 
 bootstrap_user_roles() {
   log_step "Bootstrapping Role table (User/Admin/Moderator) in UserService DB"
-  docker exec -i postgres-user-db psql -U postgres -d user-service-db -v ON_ERROR_STOP=1 -q <<'SQL'
+  docker exec -i postgres-user-db psql -U postgres -d user-service-db -v ON_ERROR_STOP=1 -q <<'SQL' || { log_fail "Role table bootstrap failed - see output above"; exit 1; }
 INSERT INTO "Role" ("Name")
 SELECT v FROM (VALUES ('User'), ('Admin'), ('Moderator')) AS t(v)
 WHERE NOT EXISTS (SELECT 1 FROM "Role" WHERE "Name" = t.v);
@@ -31,7 +31,7 @@ SQL
 bootstrap_vote_types() {
   local container="$1" database="$2"
   log_step "Bootstrapping VoteType table (Upvote/Downvote) in $database"
-  docker exec -i "$container" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 -q <<'SQL'
+  docker exec -i "$container" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 -q <<'SQL' || { log_fail "VoteType table bootstrap failed for $database - see output above"; exit 1; }
 INSERT INTO "VoteType" ("Name", "MinReputationToVote", "ReputationChange")
 SELECT v.name, v.min_rep, v.change
 FROM (VALUES ('Upvote', 15, 1), ('Downvote', 125, -1)) AS v(name, min_rep, change)
@@ -42,7 +42,7 @@ SQL
 
 bootstrap_reputation_rules() {
   log_step "Bootstrapping ReputationRule table in UserService DB"
-  docker exec -i postgres-user-db psql -U postgres -d user-service-db -v ON_ERROR_STOP=1 -q <<'SQL'
+  docker exec -i postgres-user-db psql -U postgres -d user-service-db -v ON_ERROR_STOP=1 -q <<'SQL' || { log_fail "ReputationRule table bootstrap failed - see output above"; exit 1; }
 INSERT INTO "ReputationRule" ("EventType", "EntityType", "Group", "ReputationChange", "ReputationTarget")
 SELECT v.event_type, v.entity_type, v.grp, v.change, v.target
 FROM (VALUES

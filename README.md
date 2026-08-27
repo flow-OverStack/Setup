@@ -16,7 +16,7 @@ pulled in as git submodules, brought up with Docker Compose, and seeded with moc
 ## Quick start
 
 ```bash
-git clone --recurse-submodules --shallow-submodules <this-repo-url>
+git clone --recurse-submodules --shallow-submodules https://github.com/flow-OverStack/Setup
 cd setup
 ./setup.sh
 ```
@@ -31,10 +31,7 @@ That's it. On first run this:
 6. Composes and starts the Apollo Gateway
 7. Seeds 6 users, 8 tags, 12 questions, 17 answers, and votes through the real APIs
 
-Takes roughly 3-6 minutes cold. Endpoints are printed at the end - also see the table in the
-[profile README](https://github.com/flow-OverStack/.github/blob/main/profile/README.md), noting that
-one is wrong: the profile lists the host `dotnet run` HTTPS ports (7163/7067/7216/7233); the Docker
-containers here publish HTTP on 8085/8087/8089/8091.
+Takes roughly 10 minutes cold. Endpoints are printed at the end.
 
 ## Flags
 
@@ -61,7 +58,7 @@ match the secret already baked into the existing Keycloak realm, because import 
 If `.env` is lost (deleted, or a fresh clone pointed at old volumes) while a Keycloak volume still
 exists, `setup.sh` refuses to blindly generate a new token - a mismatched one would fail every
 downstream step - and tells you to either restore the real secret from the Keycloak admin console
-(**Clients → user-service → Credentials**) or run `./teardown.sh --volumes` to start clean.
+(**Clients → user-service → Credentials**) or run with `--reset` flag to start clean.
 
 ## Teardown
 
@@ -105,27 +102,3 @@ The submodule compose files are never edited or copied - `overrides/*.yml` are l
 `docker compose -f base -f override`, which deep-merges rather than replaces (see comments in
 `overrides/common.override.yml` for the merge semantics). `git submodule update --force` is therefore
 always safe to run.
-
-## Known gaps in the upstream services
-
-Three things the setup repo works around that are arguably bugs in the service repos themselves,
-documented here so nobody re-discovers them the hard way:
-
-- **No seed data for `Role` or `VoteType`.** `/auth/register` looks up a `Role` row named `"User"`
-  and fails outright if it's missing - on a truly fresh database, registration itself is broken, not
-  just admin features. `RoleController` (the only API that can create a `Role`) requires the `Admin`
-  role, which requires a `Role` row to exist first - circular. Voting similarly 404s until a
-  `VoteType` row named `Upvote`/`Downvote` exists. `lib/bootstrap-data.sh` inserts both directly via
-  `psql`, idempotently, right after migrations run. Worth fixing upstream with a proper EF Core seed
-  migration in UserService, QuestionService, and AnswerService.
-- **No seed data for `ReputationRule` either**, so every vote/accept event silently no-ops
-  (`ReputationService.ApplyReputationEventAsync` returns a clean failure the Kafka consumer just logs
-  and drops) and every user's reputation stays 0 forever. Non-fatal, unlike the two above - `psql`
-  seeds seven rules covering upvote/downvote/accept for questions and answers so seeded users show
-  real reputation; the point values are illustrative dev defaults, not derived from the codebase, so
-  edit them freely in `lib/bootstrap-data.sh`.
-- **No way to grant the first Admin.** Same circularity as the `Role` gap, one level up: nothing in
-  the public API can ever create the first Admin user. `seed/seed.mjs` works around it by calling the
-  Keycloak Admin API directly (using the same `KC_ADMIN_TOKEN` client secret `setup.sh` already
-  validates) to add `Admin` to one seed user's `roles` attribute, then re-logs them in for a token
-  that carries it.

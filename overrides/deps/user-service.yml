@@ -1,0 +1,31 @@
+# Layered onto the service's compose file on EVERY run.
+#
+# The base compose file (a submodule - never edited in place) uses the short
+# `depends_on: [postgres-db]` form, which only means "container created", not
+# "Postgres accepts TCP". The postgres:17 entrypoint runs initdb against a
+# temporary server bound to the unix socket only, and opens the real TCP
+# listener afterwards - under load that gap ran to ~105s here, so the service
+# raced ahead, failed to connect in MigrateDatabaseAsync, and died on an
+# unhandled exception with no restart policy to bring it back.
+services:
+  user-service:
+    restart: unless-stopped
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+
+  postgres-db:
+    healthcheck:
+      # -h 127.0.0.1 on purpose: over the unix socket pg_isready also reports
+      # "ready" for initdb's temporary server - exactly the state we must not
+      # accept.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  logstash:
+    # Logstash shuts its pipeline down for good (exit 0) when Elasticsearch
+    # answers 503 while it is still forming its cluster during the boot storm.
+    restart: unless-stopped

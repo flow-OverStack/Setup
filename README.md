@@ -102,3 +102,10 @@ The submodule compose files are never edited or copied - `overrides/*.yml` are l
 `docker compose -f base -f override`, which deep-merges rather than replaces (see comments in
 `overrides/common.override.yml` for the merge semantics). `git submodule update --force` is therefore
 always safe to run.
+
+`overrides/deps/<service>.yml` is applied on every run: it adds a `pg_isready` healthcheck to each
+service's Postgres and gates the service on `condition: service_healthy`. Without it the service races
+the postgres:17 entrypoint (which runs initdb against a unix-socket-only temporary server before it
+opens the TCP listener), fails its startup migration on `Connection refused`, and stays dead - the base
+files carry no restart policy. The same override adds `restart: unless-stopped` to the service and to
+its Logstash sidecar, which otherwise exits for good when Elasticsearch 503s during a cold start.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Sourced by setup.sh. depends_on doesn't wait for readiness and none of the
-# base compose files carry healthchecks, so every gate here is an explicit
-# poll - never a fixed sleep.
+# Sourced by setup.sh. overrides/deps adds a healthcheck to each service's
+# Postgres (and gates the service on it), but nothing else in the stack carries
+# one - so every gate here is an explicit poll, never a fixed sleep.
 
 # wait_http <url> <timeout_seconds> [expected_status]
 # Polls until the URL returns the expected HTTP status (default: any 2xx-4xx,

@@ -252,9 +252,13 @@ FIRST_RUN=0
 
 up_service() {
   local name="$1" compose_file="$2" project="$3"
-  local cmd="$COMPOSE -p $project -f repos/$name/$compose_file"
+  local slug
+  slug=$(echo "$name" | sed -E 's/([a-z])([A-Z])/\1-\2/g' | tr '[:upper:]' '[:lower:]')
+  # overrides/deps gates the service on its Postgres passing a real healthcheck -
+  # without it the app races initdb and dies. Applied on every run, unlike migrate/.
+  local cmd="$COMPOSE -p $project -f repos/$name/$compose_file -f overrides/deps/$slug.yml"
   if [ "$FIRST_RUN" = "1" ] || [ "$DO_MIGRATE" = "1" ]; then
-    cmd="$cmd -f overrides/migrate/$(echo "$name" | sed -E 's/([a-z])([A-Z])/\1-\2/g' | tr '[:upper:]' '[:lower:]').yml"
+    cmd="$cmd -f overrides/migrate/$slug.yml"
   fi
   log_step "Starting $name"
   log_run $cmd up -d || {
